@@ -4,6 +4,7 @@ This repo contains code for the main experiments in our paper:
 **Continuously Steering LLMs Sensitivity to Contextual Knowledge with Proxy Models**
 
 ## Repo Structure
+```bash
 ├─CONSTRUCT_DATA
 │  ├─MUSIQUE
 │  │  ├─TEST_CODE
@@ -37,7 +38,7 @@ This repo contains code for the main experiments in our paper:
 │  └─data_short_least_similar
 └─proxy_model
     └─__pycache__
-
+```
 ## proxy_model
 - This folder defines the CSKS inference framework that corporates the target model and the proxy models, corresponding to **Section 2.1 CSKS Framework** in our paper.
 
