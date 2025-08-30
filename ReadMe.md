@@ -1,12 +1,10 @@
 # CSKS: Continuously Steering LLMs Sensitivity to Contextual Knowledge with Proxy Models
-
-[![Paper](https://img.shields.io/badge/Paper-arXiv-red)](https://arxiv.org/abs/2508.19720)
-[![Code](https://img.shields.io/badge/Code-GitHub-green)](https://github.com/OliveJuiceLin/CSKS)
-
+---
 This repository contains the official implementation of our paper:
 
 **Continuously Steering LLMs Sensitivity to Contextual Knowledge with Proxy Models**
 
+Paper link: https://arxiv.org/abs/2508.19720
 ## Abstract
 
 In Large Language Models (LLMs) generation, there exist knowledge conflicts where parametric knowledge contradicts knowledge provided in the context. We propose **CSKS** (Continuously Steering Knowledge Sensitivity), a simple framework that can steer LLMs' sensitivity to contextual knowledge continuously at a lightweight cost. Specifically, we tune two small LMs (proxy models) and use the difference in their output distributions to shift the original distribution of an LLM without modifying the LLM weights.
@@ -240,5 +238,5 @@ For questions or issues, please:
 
 ---
 
-**Note**: This repository is under active development. Please check back for updates and new features!
+**Note**: This repository is under active development.
 
