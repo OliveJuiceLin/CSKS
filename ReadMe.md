@@ -5,9 +5,13 @@ This repository contains the official implementation of our paper:
 **Continuously Steering LLMs Sensitivity to Contextual Knowledge with Proxy Models**
 
 Paper link: https://arxiv.org/abs/2508.19720
+
+
 ## Abstract
 
 In Large Language Models (LLMs) generation, there exist knowledge conflicts where parametric knowledge contradicts knowledge provided in the context. We propose **CSKS** (Continuously Steering Knowledge Sensitivity), a simple framework that can steer LLMs' sensitivity to contextual knowledge continuously at a lightweight cost. Specifically, we tune two small LMs (proxy models) and use the difference in their output distributions to shift the original distribution of an LLM without modifying the LLM weights.
+
+
 
 ## 🔥 Key Features
 
@@ -17,6 +21,23 @@ In Large Language Models (LLMs) generation, there exist knowledge conflicts wher
 - **Black-box Compatible**: Works with API-based models like GPT-3.5-Turbo
 - **Model Agnostic**: Supports different model families (LLaMA, Qwen, Gemma)
 
+
+## 📁 Repository Structure
+
+```
+├── proxy_model/                    # Core CSKS framework implementation
+│   └── dexpert.py                 # Main DExpertsLlama class
+├── CONSTRUCT_DATA/                # Dataset construction and evaluation
+│   ├── MUSIQUE/                   # MuSiQue dataset processing
+│   │   ├── TEST_CODE/            # Evaluation scripts
+│   │   └── TEST_RESULT/          # Experimental results
+│   └── POP_QA/                   # PopQA dataset processing
+│       ├── TEST_CODE/            # Evaluation scripts
+│       └── TEST_RESULT/          # Experimental results
+├── FINE-TUNING-CONTEXT/          # Context-faithful model training
+├── FINE-TUNING-PARAMETRIC/       # Parametric-faithful model training
+└── eval-mmlu/                    # MMLU evaluation scripts
+```
 ## 🚀 Quick Start
 
 ### Environment Setup
@@ -139,22 +160,7 @@ python FINE-TUNING.py \
     --per_device_train_batch_size 2
 ```
 
-## 📁 Repository Structure
 
-```
-├── proxy_model/                    # Core CSKS framework implementation
-│   └── dexpert.py                 # Main DExpertsLlama class
-├── CONSTRUCT_DATA/                # Dataset construction and evaluation
-│   ├── MUSIQUE/                   # MuSiQue dataset processing
-│   │   ├── TEST_CODE/            # Evaluation scripts
-│   │   └── TEST_RESULT/          # Experimental results
-│   └── POP_QA/                   # PopQA dataset processing
-│       ├── TEST_CODE/            # Evaluation scripts
-│       └── TEST_RESULT/          # Experimental results
-├── FINE-TUNING-CONTEXT/          # Context-faithful model training
-├── FINE-TUNING-PARAMETRIC/       # Parametric-faithful model training
-└── eval-mmlu/                    # MMLU evaluation scripts
-```
 
 ## 📈 Results
 
