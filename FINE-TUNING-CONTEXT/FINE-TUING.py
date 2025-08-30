@@ -1,50 +1,14 @@
 import pandas as pd
 from datasets import Dataset
-from transformers import AutoTokenizer,AutoModelForCausalLM,trainer,training_args,BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig
 import torch
-from torch import nn
-import einops
 import os
-from peft import LoraConfig,get_peft_model
-from trl import SFTTrainer,DataCollatorForCompletionOnlyLM
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'
+from peft import LoraConfig, get_peft_model
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+import argparse
 
-#量化选项
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,#在4bit上，进行量化
-    bnb_4bit_use_double_quant=True,# 嵌套量化，每个参数可以多节省0.4位
-    bnb_4bit_quant_type="nf4",#NF4（normalized float）或纯FP4量化 博客说推荐NF4
-    bnb_4bit_compute_dtype=torch.float16,
-)
-model_id = ''
-# 数据集
-train_data_path = 'data/target_dataset_train_SHORT_SHORT.csv'
-val_data_path = 'data/target_dataset_validation_SHORT_SHORT.csv'
-df_train = pd.read_csv(train_data_path)
-df_val = pd.read_csv(val_data_path)
-dataset_train = Dataset.from_pandas(df_train)
-dataset_val = Dataset.from_pandas(df_val)
-
-
-# 数据集处理
-def convert_to_instructive_format_1(example):
-    question = example['question']
-    context = example['context']
-    choices = example['choices']
-    
-    # 格式化选项
-    formatted_choices = " ".join([f"{chr(65 + i)}. {choice}" for i, choice in enumerate(choices)])
-    messages = [
-    {"role": "system",
-     "content": "You are a helpful AI assistant designed to answer questions. You should understand the context and content of every question and then choose the correct option to answer the question. Always answer in the format: 'Answer: [option]\n\nExplaination: [your explanation]'"},
-    {"role": "user", 
-     "content": f"Choose the correct option to answer the following question:\n{context}\n{question}\n{formatted_choices}\n"}
-    ]
-    ans = example['c_answer']
-    explanation = example['explanation']
-    response = [{"role":"assistant", "content": f"Answer: {ans}\n\nExplanation: {explanation}"}]
-    return {'input_text': messages, 'output_text': response}
-def convert_to_instructive_format_2(example):
+def convert_to_instructive_format(example):
+    """将DataFrame中的一行数据转换为模型需要的对话格式"""
     question = example['question']
     context = example['context']
     choices = example['choices']
@@ -55,195 +19,148 @@ def convert_to_instructive_format_2(example):
     ans = example['c_answer']
     explanation = example['explanation']
     message = [
-    {"role": "system",
-     "content": "You are a helpful AI assistant designed to answer questions. You should understand the context and content of every question and then choose the correct option to answer the question. Always answer in the format: 'Answer: [option]\n\nExplaination: [your explanation]'"},
-    {"role": "user", 
-     "content": f"Choose the correct option to answer the following question:\n{context}\n{question}\n{formatted_choices}\n"},
-    {"role": "assistant", "content": f"Answer: {ans}\n\nExplaination: {explanation}"}
+        {"role": "system",
+         "content": "You are a helpful AI assistant designed to answer questions. You should understand the context and content of every question and then choose the correct option to answer the question. Always answer in the format: 'Answer: [option]\n\nExplaination: [your explanation]'"},
+        {"role": "user", 
+         "content": f"Choose the correct option to answer the following question:\n{context}\n{question}\n{formatted_choices}\n"},
+        {"role": "assistant", "content": f"Answer: {ans}\n\nExplaination: {explanation}"}
     ]
     return {'conversation': message}
 
-choice = 'after'
-if choice == 'after':
-    convert_to_instructive_format = convert_to_instructive_format_2
-elif choice == 'before':
-    convert_to_instructive_format = convert_to_instructive_format_1
-
-processed_dataset = dataset_train.map(convert_to_instructive_format, remove_columns=['question', 'context', 'choices', 'c_answer', 'explanation'])
-processed_dataset_val = dataset_val.map(convert_to_instructive_format, remove_columns=['question', 'context', 'choices', 'c_answer', 'explanation'])
-
-
-# 加载模型和tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-#tokenizer.pad_token = tokenizer.eos_token### 修改
-#量化?
-base_model = AutoModelForCausalLM.from_pretrained(model_id,quantization_config=bnb_config)
-#base_model = AutoModelForCausalLM.from_pretrained(model_id,)
-# 训练的时候右侧填充
-tokenizer.padding_side = 'right'
-# 生成的时候左侧填充
-#tokenizer.padding_side = 'left'
-# Qwen模型不需要
-# tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-
-base_model.config.pretraining_tp = 1
-peft_config = LoraConfig(
-    lora_alpha=32,
-    lora_dropout=0.05,
-    target_modules=["q_proj", "v_proj", "down_proj"],
-    r=16,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
-
-######################################################
-# frozen等操作
-for i, param in enumerate(base_model.parameters()):
-    param.requires_grad = False  # freeze the model - train adapters later
-#     print(i, 'param.requires_grad = False')
-    if param.ndim == 1:
-        # cast the small parameters (e.g. layernorm) to fp32 for stability
-        param.data = param.data.to(torch.float32)
-#         print(i, 'ndim == 1, torch.float16 to torch.float32')
-# reduce number of stored activations
-base_model.gradient_checkpointing_enable()
-base_model.enable_input_require_grads()
-
-
-#class CastOutputToFloat(nn.Sequential):
-#    def forward(self, x):
-#        return super().forward(x).to(torch.float32)
-#base_model.lm_head = CastOutputToFloat(base_model.lm_head)
-
-######################################################
-model = get_peft_model(base_model, peft_config)
-# Qwen模型不需要这一步
-# with torch.no_grad():
-#     model.resize_token_embeddings(len(tokenizer))
-#     model.config.pad_token_id = tokenizer.pad_token_id  
-
-
-# 进行tokenize
-def tokenize_function_1(examples):
-    # inputs
-    template_inputs = tokenizer.apply_chat_template(examples['input_text'],tokenize=False,add_generation_prompt=True)
-    inputs = tokenizer(template_inputs, padding="max_length", truncation=True, max_length=512)
-    # outputs
-    template_outputs = tokenizer.apply_chat_template(examples['output_text'],tokenize=False,add_generation_prompt=False)
-    start_index = template_outputs.find('Answer:')
-    template_outputs = template_outputs[start_index:]
-    labels = tokenizer(template_outputs, padding="max_length", truncation=True, max_length=128)
-    # 对 input_text 进行编码
-    #inputs = tokenizer(examples['input_text'], padding="max_length", truncation=True, max_length=512)
-    # 对 output_text 进行编码，并将其作为标签
-    #labels = tokenizer(examples['output_text'], padding="max_length", truncation=True, max_length=128)
-    inputs["labels"] = labels["input_ids"]
-    return inputs
-def tokenize_function_2(examples):
+def tokenize_function(examples, tokenizer):
+    """对对话数据进行tokenize"""
     output_texts = []
     for c in examples["conversation"]:
-        text = tokenizer.apply_chat_template(c, tokenize=False,add_generation_prompt=False)
+        text = tokenizer.apply_chat_template(c, tokenize=False, add_generation_prompt=False)
         output_texts.append(text)
     return output_texts
-if choice == 'after':
-    tokenize_function = tokenize_function_2
-elif choice == 'before':
-    tokenize_function = tokenize_function_1
 
-if choice == 'before':
-    tokenized_dataset = processed_dataset.map(tokenize_function,batched=True)
-    tokenized_dataset.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-    tokenized_dataset_val = processed_dataset_val.map(tokenize_function, batched=True)
-    tokenized_dataset_val.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-    output_dir = ""
-    training_args = training_args.TrainingArguments(
-        output_dir=output_dir,
-        learning_rate=2e-5,            # 学习率
-        per_device_train_batch_size=4,  # 训练时每个设备的batch大小
-        per_device_eval_batch_size=4,   # 评估时每个设备的batch大小
-        num_train_epochs=4,             # 训练的epoch数
-        weight_decay=0.01,              # 权重衰减
-        save_steps=1000,                # 每1000步保存一次模型
-        save_total_limit=2,             # 最多保留两个模型检查点
-        logging_dir='',           # 日志目录
-        report_to="tensorboard",      # 将日志报告到 TensorBoard 
-        evaluation_strategy="epoch",  # 每隔一定步数进行评估
-        
-        logging_strategy="steps",     # 每隔一定步数记录日志
-        logging_steps=100,            # 每100步记录一次日志
-        log_level='info',             # 设置日志级别
-        disable_tqdm=False,           # 启用进度条
-        gradient_accumulation_steps=4,
-        
+def main(args):
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_devices
+
+    # 量化配置
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
     )
 
-    trainer = SFTTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_dataset,
-    eval_dataset=tokenized_dataset_val,
-    tokenizer=tokenizer,
-)
-elif choice == 'after':
+    # 加载数据集
+    df_train = pd.read_csv(args.train_data_path)
+    df_val = pd.read_csv(args.val_data_path)
+    dataset_train = Dataset.from_pandas(df_train)
+    dataset_val = Dataset.from_pandas(df_val)
+
+    # 格式化数据集
+    processed_dataset = dataset_train.map(convert_to_instructive_format, remove_columns=dataset_train.column_names)
+    processed_dataset_val = dataset_val.map(convert_to_instructive_format, remove_columns=dataset_val.column_names)
+
+    # 加载模型和tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+    base_model = AutoModelForCausalLM.from_pretrained(args.model_id, quantization_config=bnb_config)
+    
+    # 训练时右侧填充
+    tokenizer.padding_side = 'right'
+    base_model.config.pretraining_tp = 1
+
+    # LoRA 配置
+    peft_config = LoraConfig(
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=args.target_modules,
+        r=args.lora_r,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
+    # 模型预处理以进行PEFT训练
+    for i, param in enumerate(base_model.parameters()):
+        param.requires_grad = False
+        if param.ndim == 1:
+            param.data = param.data.to(torch.float32)
+            
+    base_model.gradient_checkpointing_enable()
+    base_model.enable_input_require_grads()
+
+    model = get_peft_model(base_model, peft_config)
+
+    # 数据整理器
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(
         tokenizer=tokenizer,
         response_template=response_template,
     )
-    output_dir = ""
-    training_args_1 = training_args.TrainingArguments(
-        output_dir=output_dir,
-        learning_rate=2e-5,            # 学习率
-        per_device_train_batch_size=4,  # 训练时每个设备的batch大小
-        per_device_eval_batch_size=4,   # 评估时每个设备的batch大小
-        num_train_epochs=3,             # 训练的epoch数
-        weight_decay=0.01,              # 权重衰减
-        save_steps=1000,                # 每1000步保存一次模型
-        save_total_limit=2,             # 最多保留两个模型检查点
-        logging_dir='',           # 日志目录
-        report_to="tensorboard",      # 将日志报告到 TensorBoard 
-        evaluation_strategy="epoch",  # 每隔一定步数进行评估
-        
-        logging_strategy="steps",     # 每隔一定步数记录日志
-        logging_steps=100,            # 每100步记录一次日志
-        log_level='info',             # 设置日志级别
-        disable_tqdm=False,           # 启用进度条
-        gradient_accumulation_steps=4,
-        
-    )
-    training_args_2 = training_args.TrainingArguments(
-        output_dir=output_dir,
-        learning_rate=5e-5,
-        per_device_train_batch_size=4,  # 尝试减少到2或1
-        per_device_eval_batch_size=4,
-        num_train_epochs=3,
-        weight_decay=0.01,
-        save_steps=1000,
-        save_total_limit=2,
-        logging_dir='',
+
+    # 训练参数
+    training_args = TrainingArguments(
+        output_dir=args.output_dir,
+        learning_rate=args.learning_rate,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        num_train_epochs=args.num_train_epochs,
+        weight_decay=args.weight_decay,
+        save_steps=args.save_steps,
+        save_total_limit=args.save_total_limit,
+        logging_dir=os.path.join(args.output_dir, 'logs'),
         report_to="tensorboard",
         evaluation_strategy="epoch",
         logging_strategy="steps",
-        logging_steps=100,
+        logging_steps=args.logging_steps,
         log_level='info',
-        disable_tqdm=False,
-        gradient_accumulation_steps=2,  # 尝试减少到2或1
-        fp16=True,  # 启用混合精度
-        #gradient_checkpointing=True,  # 启用梯度检查点
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        fp16=True,
     )
 
-    training_args = training_args_2
+    # 初始化训练器
     trainer = SFTTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=processed_dataset,
-    eval_dataset=processed_dataset_val,
-    tokenizer=tokenizer,
-    formatting_func=tokenize_function,
-    data_collator=collator,
-    dataset_kwargs={"add_special_tokens": False},  # 特殊 token 已经在 formatting_func 加过了
-)
-trainer.train()
+        model=model,
+        args=training_args,
+        train_dataset=processed_dataset,
+        eval_dataset=processed_dataset_val,
+        tokenizer=tokenizer,
+        formatting_func=lambda examples: tokenize_function(examples, tokenizer),
+        data_collator=collator,
+        dataset_kwargs={"add_special_tokens": False},
+    )
+    
+    # 开始训练
+    trainer.train()
 
-output_dir = os.path.join(output_dir, "final_checkpoint")
-trainer.model.save_pretrained(output_dir)
+    # 保存最终模型
+    final_checkpoint_dir = os.path.join(args.output_dir, "final_checkpoint")
+    trainer.model.save_pretrained(final_checkpoint_dir)
+    print(f"Final model saved to {final_checkpoint_dir}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fine-tune a model using LoRA and SFTTrainer.")
+    
+    # Paths
+    parser.add_argument("--model_id", type=str, required=True, help="Hugging Face model ID for the base model.")
+    parser.add_argument("--train_data_path", type=str, default='data/target_dataset_train_SHORT_SHORT.csv', help="Path to the training data CSV file.")
+    parser.add_argument("--val_data_path", type=str, default='data/target_dataset_validation_SHORT_SHORT.csv', help="Path to the validation data CSV file.")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save checkpoints and final model.")
+    
+    # System
+    parser.add_argument("--cuda_devices", type=str, default='0', help="CUDA visible devices.")
+    
+    # LoRA parameters
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA attention dimension (r).")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha parameter.")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout probability.")
+    parser.add_argument("--target_modules", nargs='+', default=["q_proj", "v_proj", "down_proj"], help="Modules to apply LoRA to.")
+    
+    # Training parameters
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Initial learning rate.")
+    parser.add_argument("--per_device_train_batch_size", type=int, default=4, help="Batch size per device for training.")
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=4, help="Batch size per device for evaluation.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2, help="Number of updates steps to accumulate before performing a backward/update pass.")
+    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs.")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--save_steps", type=int, default=1000, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--save_total_limit", type=int, default=2, help="Limit the total amount of checkpoints.")
+    parser.add_argument("--logging_steps", type=int, default=100, help="Log every X updates steps.")
+
+    args = parser.parse_args()
+    main(args)
